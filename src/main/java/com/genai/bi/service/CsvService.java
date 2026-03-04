@@ -24,7 +24,7 @@ public class CsvService {
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(file.getInputStream()))) {
 
-            String tableName = "uploaded_data";
+            String tableName = file.getOriginalFilename().replace(".csv","").replaceAll("[^a-zA-Z0-9]", "_").toLowerCase();
 
             String headerLine = reader.readLine();
             List<String> headers = Arrays.stream(headerLine.split(","))
