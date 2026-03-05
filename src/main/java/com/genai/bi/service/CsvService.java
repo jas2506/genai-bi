@@ -24,36 +24,57 @@ public class CsvService {
         try (BufferedReader reader = new BufferedReader(
                 new InputStreamReader(file.getInputStream()))) {
 
-            String tableName = "uploaded_data";
+            String tableName = file.getOriginalFilename()
+                    .replace(".csv", "")
+                    .replaceAll("[^a-zA-Z0-9]", "_")
+                    .toLowerCase();
 
             String headerLine = reader.readLine();
+
             List<String> headers = Arrays.stream(headerLine.split(","))
                     .map(h -> h.trim()
                             .replaceAll("[^a-zA-Z0-9]", "_")
                             .toLowerCase())
                     .collect(Collectors.toList());
 
-            createTable(headers, tableName);
+            // 🔹 Read first data row to detect column types
+            String firstDataLine = reader.readLine();
+
+            if (firstDataLine == null) {
+                throw new RuntimeException("CSV contains no data rows");
+            }
+
+            List<String> firstRow = Arrays.stream(firstDataLine.split(",", -1))
+                    .map(String::trim)
+                    .collect(Collectors.toList());
+
+            // 🔹 Detect and store column types so we can use them for parsing later
+            List<String> columnTypes = detectColumnTypes(firstRow);
+
+            // 🔹 Create table using detected types
+            createTable(headers, columnTypes, tableName);
+
+            // 🔹 Insert first row (parsed into proper data types)
+            insertRow(headers, firstRow, columnTypes, tableName);
 
             String line;
-            while ((line = reader.readLine()) != null) {
-                // 1. Skip completely empty lines
-                if (line.trim().isEmpty()) {
-                    continue;
-                }
 
-                // 2. Add -1 to split() to preserve trailing empty columns
+            while ((line = reader.readLine()) != null) {
+
+                if (line.trim().isEmpty())
+                    continue;
+
                 List<String> values = Arrays.stream(line.split(",", -1))
                         .map(String::trim)
                         .collect(Collectors.toList());
 
-                // 3. Safety check to prevent SQL argument mismatch errors
                 if (values.size() != headers.size()) {
-                    System.out.println("Skipping malformed row (column mismatch): " + line);
+                    System.out.println("Skipping malformed row: " + line);
                     continue;
                 }
 
-                insertRow(headers, values, tableName);
+                // 🔹 Insert subsequent rows (parsed into proper data types)
+                insertRow(headers, values, columnTypes, tableName);
             }
 
         } catch (Exception e) {
@@ -61,7 +82,21 @@ public class CsvService {
         }
     }
 
-    private void createTable(List<String> headers, String tableName) {
+    /**
+     * Helper method to determine the SQL data type based on the values in the sample row.
+     */
+    private List<String> detectColumnTypes(List<String> sampleRow) {
+        return sampleRow.stream().map(value -> {
+            if (value.matches("-?\\d+")) {
+                return "INTEGER"; // Use BIGINT if you expect very large numbers
+            } else if (value.matches("-?\\d+\\.\\d+")) {
+                return "DOUBLE PRECISION";
+            }
+            return "TEXT";
+        }).collect(Collectors.toList());
+    }
+
+    private void createTable(List<String> headers, List<String> types, String tableName) {
 
         StringBuilder sql = new StringBuilder();
 
@@ -69,8 +104,11 @@ public class CsvService {
                 .append(tableName)
                 .append(" (");
 
-        for (String header : headers) {
-            sql.append(header).append(" TEXT,");
+        for (int i = 0; i < headers.size(); i++) {
+            sql.append(headers.get(i))
+                    .append(" ")
+                    .append(types.get(i))
+                    .append(",");
         }
 
         sql.deleteCharAt(sql.length() - 1);
@@ -79,7 +117,7 @@ public class CsvService {
         jdbcTemplate.execute(sql.toString());
     }
 
-    private void insertRow(List<String> headers, List<String> values, String tableName) {
+    private void insertRow(List<String> headers, List<String> values, List<String> types, String tableName) {
 
         String columns = String.join(",", headers);
 
@@ -90,6 +128,36 @@ public class CsvService {
         String sql = "INSERT INTO " + tableName +
                 " (" + columns + ") VALUES (" + placeholders + ")";
 
-        jdbcTemplate.update(sql, values.toArray());
+        // 🔹 Create an array of Objects to hold properly casted values
+        Object[] parsedValues = new Object[values.size()];
+
+        for (int i = 0; i < values.size(); i++) {
+            String val = values.get(i);
+            String type = types.get(i);
+
+            if (val == null || val.isEmpty()) {
+                parsedValues[i] = null;
+                continue;
+            }
+
+            try {
+                // Convert string to the correct Java object based on detected SQL type
+                switch (type) {
+                    case "INTEGER":
+                        parsedValues[i] = Long.parseLong(val); // Using Long prevents overflow for large numbers
+                        break;
+                    case "DOUBLE PRECISION":
+                        parsedValues[i] = Double.parseDouble(val);
+                        break;
+                    default:
+                        parsedValues[i] = val; // TEXT stays as String
+                }
+            } catch (NumberFormatException e) {
+                // Fallback in case a later row violates the first row's detected type pattern
+                parsedValues[i] = val;
+            }
+        }
+
+        jdbcTemplate.update(sql, parsedValues);
     }
 }
